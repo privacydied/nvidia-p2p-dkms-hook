@@ -1,0 +1,12 @@
+# Patch nvidia-open-dkms sources with the aikitoria P2P patch before
+# 70-dkms-install/70-dkms-upgrade build them. Falls back to stock on failure.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/src/nvidia-*/dkms.conf
+
+[Action]
+Description = Applying NVIDIA P2P patch (aikitoria) to DKMS sources...
+When = PostTransaction
+Exec = /usr/local/bin/nvidia-p2p-apply

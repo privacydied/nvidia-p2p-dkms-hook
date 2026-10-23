@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Apply the aikitoria P2P patch (/etc/nvidia-p2p/p2p.diff) to every
+# nvidia-open-dkms source tree in /usr/src, before DKMS builds it.
+# Run by /etc/pacman.d/hooks/60-nvidia-p2p.hook (sorts before 70-dkms-*).
+# Never fails the transaction: if the patch does not apply, the tree stays
+# stock (normal driver, no P2P) and a warning is printed.
+set -u
+DIFF=/etc/nvidia-p2p/p2p.diff
+LOG=/var/log/nvidia-p2p.log
+rc=0
+
+say() { echo "nvidia-p2p: $*"; echo "$(date -Is) $*" >> "$LOG"; }
+
+[ -r "$DIFF" ] || { say "no $DIFF, nothing to do"; exit 0; }
+
+for tree in /usr/src/nvidia-*/; do
+    tree=${tree%/}
+    [ -f "$tree/dkms.conf" ] && [ -d "$tree/src/nvidia" ] || continue
+    ver=${tree#/usr/src/nvidia-}
+    if patch -d "$tree" -p1 -R --dry-run -s -f < "$DIFF" >/dev/null 2>&1; then
+        say "$ver: P2P patch already applied"
+    elif patch -d "$tree" -p1 --dry-run -s -f < "$DIFF" >/dev/null 2>&1; then
+        if patch -d "$tree" -p1 -s -f --no-backup-if-mismatch < "$DIFF" >/dev/null; then
+            say "$ver: P2P patch applied"
+        else
+            say "WARNING $ver: patch failed mid-apply; reinstall nvidia-open-dkms"; rc=1
+        fi
+    else
+        say "WARNING $ver: P2P patch does NOT apply. Driver stays STOCK (no P2P)."
+        say "         Run nvidia-p2p-refresh once aikitoria publishes a ${ver%%.*}-series branch."
+    fi
+done
+exit 0

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Regenerate /etc/nvidia-p2p/p2p.diff from aikitoria's newest *-p2p branch
+# (diff against the NVIDIA open-gpu-kernel-modules tag it is based on), check
+# it against the installed tree, then (with --install) apply it and rebuild DKMS.
+#   nvidia-p2p-refresh             build + test the diff only
+#   nvidia-p2p-refresh --install   also install it and rebuild the modules
+set -euo pipefail
+A=https://github.com/aikitoria/open-gpu-kernel-modules
+N=https://github.com/NVIDIA/open-gpu-kernel-modules
+W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+branch=$(git ls-remote --heads "$A" | awk -F/ '/[0-9]+\.[0-9]+\.[0-9]+-p2p$/{print $3}' | sort -V | tail -1)
+base=${branch%-p2p}
+echo ":: newest branch: $branch (base tag $base)"
+git -C "$W" init -q
+git -C "$W" fetch -q --depth 200 "$A" "+refs/heads/$branch:refs/remotes/a/$branch"
+git -C "$W" fetch -q --depth 1 "$N" "+refs/tags/$base:refs/tags/$base"
+git -C "$W" diff "refs/tags/$base" "refs/remotes/a/$branch" -- . ':!patch-libcuda-p2p.py' ':!README.md' ':!install.sh' > "$W/p2p.diff"
+[ -s "$W/p2p.diff" ] || { echo "!! empty diff, refusing"; exit 1; }
+echo ":: $(grep -c '^diff --git' "$W/p2p.diff") files changed"
+tree=$(ls -d /usr/src/nvidia-* | sort -V | tail -1)
+tmp="$W/tree"; cp -a "$tree" "$tmp"
+patch -d "$tmp" -p1 --dry-run -s -f < "$W/p2p.diff" && echo ":: applies cleanly to $tree" || { echo "!! does not apply to $tree"; exit 1; }
+if [ "${1:-}" = --install ]; then
+    sudo install -Dm644 "$W/p2p.diff" /etc/nvidia-p2p/p2p.diff
+    echo "$branch" | sudo tee /etc/nvidia-p2p/SOURCE >/dev/null
+    sudo /usr/local/bin/nvidia-p2p-apply
+    v=${tree#/usr/src/nvidia-}
+    for k in /usr/lib/modules/*/build; do k=${k%/build}; k=${k##*/}
+        sudo dkms build --force "nvidia/$v" -k "$k" && sudo dkms install --force "nvidia/$v" -k "$k"
+    done
+    echo ":: done; reboot to load the P2P modules"
+fi
