@@ -48,3 +48,8 @@ nvidia-smi topo -p2p r         # OK = P2P enabled, GNS = blocked
 `dkms install --force` reinstalls the cached build and does **not** recompile.
 Use `dkms build --force` first (the scripts do). `nvidia` is in mkinitcpio
 `MODULES=`, so run `mkinitcpio -P` after a manual rebuild.
+
+## License
+
+Scripts and hook: MIT (see `LICENSE`). `patch/p2p.diff` stays under the
+upstream NVIDIA open-gpu-kernel-modules dual MIT/GPLv2 terms.
