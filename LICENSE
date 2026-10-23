@@ -19,8 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-patch/p2p.diff is derived from NVIDIA open-gpu-kernel-modules and
-aikitoria/open-gpu-kernel-modules, and remains under their original
-dual MIT/GPLv2 terms (see those repositories' COPYING files).
