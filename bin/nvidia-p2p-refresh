@@ -1,32 +1,90 @@
 #!/usr/bin/env bash
-# Regenerate /etc/nvidia-p2p/p2p.diff from aikitoria's newest *-p2p branch
-# (diff against the NVIDIA open-gpu-kernel-modules tag it is based on), check
-# it against the installed tree, then (with --install) apply it and rebuild DKMS.
+# Regenerate /etc/nvidia-p2p/p2p.diff and test it against the installed
+# nvidia-open-dkms source tree. Sources, tried in order; the first diff that
+# applies to the installed tree wins:
+#   1. aikitoria newest *-p2p branch (diff vs the NVIDIA tag it is based on)
+#   2. QuixiAI fork main: 4-file P2P subset vs the NVIDIA tag in its
+#      version.mk (kernel_bif.c, kern_bus_gp100.c, g_kern_bus_nvoc.c and the
+#      EnableResizableBar default flip in nv-reg.h). Needed for 620-series
+#      drivers, where aikitoria's diff no longer applies.
+# A tree that already carries the diff counts as applying.
 #   nvidia-p2p-refresh             build + test the diff only
 #   nvidia-p2p-refresh --install   also install it and rebuild the modules
 set -euo pipefail
 A=https://github.com/aikitoria/open-gpu-kernel-modules
+Q=https://github.com/QuixiAI/open-gpu-kernel-modules
 N=https://github.com/NVIDIA/open-gpu-kernel-modules
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
-branch=$(git ls-remote --heads "$A" | awk -F/ '/[0-9]+\.[0-9]+\.[0-9]+-p2p$/{print $3}' | sort -V | tail -1)
-base=${branch%-p2p}
-echo ":: newest branch: $branch (base tag $base)"
-git -C "$W" init -q
-git -C "$W" fetch -q --depth 200 "$A" "+refs/heads/$branch:refs/remotes/a/$branch"
-git -C "$W" fetch -q --depth 1 "$N" "+refs/tags/$base:refs/tags/$base"
-git -C "$W" diff "refs/tags/$base" "refs/remotes/a/$branch" -- . ':!patch-libcuda-p2p.py' ':!README.md' ':!install.sh' > "$W/p2p.diff"
-[ -s "$W/p2p.diff" ] || { echo "!! empty diff, refusing"; exit 1; }
-echo ":: $(grep -c '^diff --git' "$W/p2p.diff") files changed"
 tree=$(ls -d /usr/src/nvidia-* | sort -V | tail -1)
-tmp="$W/tree"; cp -a "$tree" "$tmp"
-patch -d "$tmp" -p1 --dry-run -s -f < "$W/p2p.diff" && echo ":: applies cleanly to $tree" || { echo "!! does not apply to $tree"; exit 1; }
+V=${tree#/usr/src/nvidia-}
+echo ":: installed tree: $tree"
+
+try_apply() {   # $1 = diff file; 0 if it applies, or is already applied
+    [ -s "$1" ] || return 1
+    rm -rf "$W/tree"; cp -a "$tree" "$W/tree"
+    patch -d "$W/tree" -p1 --dry-run -s -f < "$1" >/dev/null 2>&1 && return 0
+    patch -d "$W/tree" -p1 -R --dry-run -s -f < "$1" >/dev/null 2>&1
+}
+
+from_aikitoria() {
+    local branch base
+    branch=$(git ls-remote --heads "$A" | awk -F/ '/[0-9]+\.[0-9]+\.[0-9]+-p2p(-v[0-9]+)?$/{print $3}' | sort -V | tail -1)
+    [ -n "$branch" ] || return 1
+    base=${branch%-p2p}; base=${base%-v[0-9]*}
+    echo ":: aikitoria newest branch: $branch (base tag $base)"
+    rm -rf "$W/ai"; git init -q "$W/ai"
+    git -C "$W/ai" fetch -q --depth 200 "$A" "+refs/heads/$branch:refs/remotes/a/$branch"
+    git -C "$W/ai" fetch -q --depth 1 "$N" "+refs/tags/$base:refs/tags/$base"
+    git -C "$W/ai" diff "refs/tags/$base" "refs/remotes/a/$branch" -- . \
+        ':!patch-libcuda-p2p.py' ':!README.md' ':!install.sh' > "$W/aikitoria.diff"
+    SRC_NAME="aikitoria/$branch"; OUT="$W/aikitoria.diff"
+}
+
+from_quixiai() {
+    local base f files
+    files="src/nvidia/src/kernel/gpu/bif/kernel_bif.c
+src/nvidia/generated/g_kern_bus_nvoc.c
+src/nvidia/src/kernel/gpu/bus/arch/pascal/kern_bus_gp100.c
+kernel-open/nvidia/nv-reg.h"
+    rm -rf "$W/qx"; git init -q "$W/qx"
+    git -C "$W/qx" fetch -q --depth 1 --filter=blob:none "$Q" "+refs/heads/main:refs/remotes/q/main"
+    base=$(git -C "$W/qx" show refs/remotes/q/main:version.mk | sed -n 's/^NVIDIA_VERSION *= *//p' | head -1)
+    [ -n "$base" ] || return 1
+    echo ":: QuixiAI fork main (NVIDIA base $base)"
+    git -C "$W/qx" fetch -q --depth 1 --filter=blob:none "$N" "+refs/tags/$base:refs/tags/$base"
+    rm -rf "$W/a" "$W/b"; mkdir -p "$W/a" "$W/b"
+    for f in $files; do
+        mkdir -p "$W/a/$(dirname "$f")" "$W/b/$(dirname "$f")"
+        git -C "$W/qx" show "refs/tags/$base:$f" > "$W/a/$f"
+        if [ "$f" = kernel-open/nvidia/nv-reg.h ]; then
+            sed 's/NV_DEFINE_REG_ENTRY_GLOBAL(__NV_ENABLE_RESIZABLE_BAR, 0);/NV_DEFINE_REG_ENTRY_GLOBAL(__NV_ENABLE_RESIZABLE_BAR, 1);/' "$W/a/$f" > "$W/b/$f"
+        else
+            git -C "$W/qx" show "refs/remotes/q/main:$f" > "$W/b/$f"
+        fi
+    done
+    (cd "$W" && diff -ruN a b > "$W/quixiai.diff") || true
+    SRC_NAME="QuixiAI/open-gpu-kernel-modules main ($base base), 4-file P2P subset"; OUT="$W/quixiai.diff"
+}
+
+SRC_NAME=; OUT=
+for src in from_aikitoria from_quixiai; do
+    SRC_NAME=; OUT=
+    if $src && try_apply "$OUT"; then
+        echo ":: $(grep -c '^diff ' "$OUT") files changed; applies to $tree"
+        cp "$OUT" "$W/p2p.diff"; break
+    fi
+    echo ":: $src: no diff that applies to $V"
+done
+[ -n "$SRC_NAME" ] || { echo "!! no source produced a diff that applies to $V"; exit 1; }
+echo ":: using $SRC_NAME"
+
 if [ "${1:-}" = --install ]; then
     sudo install -Dm644 "$W/p2p.diff" /etc/nvidia-p2p/p2p.diff
-    echo "$branch" | sudo tee /etc/nvidia-p2p/SOURCE >/dev/null
+    echo "$SRC_NAME" | sudo tee /etc/nvidia-p2p/SOURCE >/dev/null
     sudo /usr/local/bin/nvidia-p2p-apply
-    v=${tree#/usr/src/nvidia-}
     for k in /usr/lib/modules/*/build; do k=${k%/build}; k=${k##*/}
-        sudo dkms build --force "nvidia/$v" -k "$k" && sudo dkms install --force "nvidia/$v" -k "$k"
+        sudo dkms build --force "nvidia/$V" -k "$k" && sudo dkms install --force "nvidia/$V" -k "$k"
     done
+    sudo mkinitcpio -P
     echo ":: done; reboot to load the P2P modules"
 fi
